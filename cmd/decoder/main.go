@@ -42,7 +42,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	decoder.readChunk(file)
+	_, err = decoder.readChunk(file)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	log.Println("PNG file parsed successfully!")
 }
@@ -75,11 +78,14 @@ func (p *PngDecoder) IsPng(file *os.File) (bool, error) {
 
 	// First 8 bytes of the PNG datastream should be the same as the const above.
 	signature := make([]byte, 8)
-	if _, err := file.Read(signature); err != nil {
+	n, err := file.Read(signature)
+	switch {
+	case err != nil:
 		return false, err
-	}
-	if !bytes.Equal(signature, []byte(pngSignatureHex)) {
-		return false, fmt.Errorf("invalid PNG signature: %b", signature)
+	case n != len(pngSignatureHex):
+		return false, fmt.Errorf("n: %d and pngSignatureHex length: %d are mismatched", n, len(pngSignatureHex))
+	case !bytes.Equal(signature, []byte(pngSignatureHex)):
+		return false, fmt.Errorf("signature mismatch: got %x, expected %x", signature, pngSignatureHex)
 	}
 
 	log.Println("Successfully validated PNG signature!")
@@ -116,7 +122,7 @@ func (p *PngDecoder) readChunk(file *os.File) (*Chunk, error) {
 	// Step 2: Read 4 bytes of chunk type data.
 	readType := make([]byte, 4)
 	if _, err := file.Read(readType); err != nil {
-		return nil, fmt.Errorf("io.ReadAll failed to read the chunkType")
+		return nil, fmt.Errorf("io.Read failed to read the chunkType")
 	}
 	// Convert the first four bytes to a string
 	chunkBuffer := string(readType)
@@ -129,20 +135,34 @@ func (p *PngDecoder) readChunk(file *os.File) (*Chunk, error) {
 	log.Printf("chunkType: %v\n", chunkType)
 
 	// Step 3: Read the chunk data according to type
-	// TODO: We need to read the chunk data part of the above.
-	// This should either be done prior to switching(not after!).
-	// Idea is to read in the data, then put whatever data into the relevant
-	// structure of that chunk type or ignore it!
+	chunkData := make([]byte, length)
+
+	n, err := file.Read(chunkData)
+	switch {
+	case n != int(length):
+		return nil, fmt.Errorf("n: %d and length: %d are mismatched for chunk data", n, length)
+	case err != nil:
+		return nil, fmt.Errorf("failed to read chunk data")
+	}
+
+	// Step 4a: Read in the crc chunk
+	var crc uint32
+	err = binary.Read(file, binary.BigEndian, &crc)
+	if err != nil {
+		return nil, fmt.Errorf("binary.Read failed: %d", crc)
+	}
+	log.Printf("crc: %08b\n", crc)
+	// TODO: Step 4b: Validate the crc chunk
+
+	// Extract the chunk data and store (or ignore) for relevant chunk type.
 	switch chunkType {
 	case ChunkIHDR:
+		// TODO: fill in IHDR chunk values
 		fmt.Println("I'm a IHDR!")
 		// Need to extract all the fields, assign them to the IHDR type.
-
 	default:
 		fmt.Printf("Skipping chunk type: %s\n", chunkType)
 	}
-
-	// TODO: Step 4: Read the CRC and validate it.
 
 	// TODO: Return the chunk
 	return &Chunk{
