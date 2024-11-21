@@ -9,6 +9,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/snksoft/crc"
 )
 
 func main() {
@@ -42,7 +44,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	_, err = decoder.readChunk(file)
+	err = decoder.ParseChunkStream(file)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -67,7 +69,17 @@ func NewPngDecoder() *PngDecoder {
 // chunks read in.
 // NOTE: This method assumes a valid PNG file has already been passed in.
 func (p *PngDecoder) ParseChunkStream(file *os.File) error {
-	p.readChunk(file)
+Loop:
+	for {
+		chunk, err := p.readChunk(file)
+		switch {
+		case err != nil:
+			return err
+		case chunk.Type.slug == ChunkIEND.slug:
+			log.Println("Reached IEND")
+			break Loop
+		}
+	}
 	return nil
 }
 
@@ -108,17 +120,6 @@ func (p *PngDecoder) readChunk(file *os.File) (*Chunk, error) {
 	}
 	log.Printf("Successfully read the length: %d\n", length)
 
-	// IHDR chunk is the FIRST chunk in the PNG datastream.
-	type IHDR struct {
-		width             uint32
-		height            uint32
-		bitDepth          uint8
-		colorType         uint8
-		compressionMethod uint8
-		filterMethod      uint8
-		interlaceMethod   uint8
-	}
-
 	// Step 2: Read 4 bytes of chunk type data.
 	readType := make([]byte, 4)
 	if _, err := file.Read(readType); err != nil {
@@ -145,29 +146,67 @@ func (p *PngDecoder) readChunk(file *os.File) (*Chunk, error) {
 		return nil, fmt.Errorf("failed to read chunk data")
 	}
 
-	// Step 4a: Read in the crc chunk
-	var crc uint32
-	err = binary.Read(file, binary.BigEndian, &crc)
+	// Step 4a: Read in the crc chunk. It is a 4-byte integer, but I need it in bytes to compute the CRC.
+	var storedCRCChunk uint32
+	err = binary.Read(file, binary.BigEndian, &storedCRCChunk)
 	if err != nil {
-		return nil, fmt.Errorf("binary.Read failed: %d", crc)
+		return nil, fmt.Errorf("binary.Read failed: %d", storedCRCChunk)
 	}
-	log.Printf("crc: %08b\n", crc)
+	log.Printf("storedCRCChunk: %d\n", storedCRCChunk)
 	// TODO: Step 4b: Validate the crc chunk
+	// Essentially, we need to create a CRC object, compute it using the chunk type + chunk data, and compare
+	// it with the crc we read in.
+
+	// The four-byte CRC is calculated on the preceding bytes in the chunk: chunk type + chunk data.
+	precedingBytes := append(readType, chunkData...)
+
+	// Create crc object
+	crc32 := crc.CRC32
+	// Compute the CRC
+	computedCRC := crc.CalculateCRC(crc32, precedingBytes)
+	// Validate the computed CRC versus the CRC stored in the PNG datastream.
+	if uint32(computedCRC) == storedCRCChunk {
+		log.Printf("checksums match for CRC validation: stored %d, calculated %d\n", storedCRCChunk, computedCRC)
+	} else {
+		return nil, fmt.Errorf("checksums failed for CRC validation: stored %d, calculated %d", storedCRCChunk, computedCRC)
+	}
+
+	// IHDR chunk is the FIRST chunk in the PNG datastream.
+	type IHDR struct {
+		width             uint32
+		height            uint32
+		bitDepth          uint8
+		colorType         uint8
+		compressionMethod uint8
+		filterMethod      uint8
+		interlaceMethod   uint8
+	}
 
 	// Extract the chunk data and store (or ignore) for relevant chunk type.
 	switch chunkType {
 	case ChunkIHDR:
 		// TODO: fill in IHDR chunk values
-		fmt.Println("I'm a IHDR!")
-		// Need to extract all the fields, assign them to the IHDR type.
+		ihdr := IHDR{
+			width:             binary.BigEndian.Uint32(chunkData[0:4]),
+			height:            binary.BigEndian.Uint32(chunkData[4:8]),
+			bitDepth:          chunkData[8],
+			colorType:         chunkData[9],
+			compressionMethod: chunkData[10],
+			filterMethod:      chunkData[11],
+			interlaceMethod:   chunkData[12],
+		}
+		log.Printf("Parsed IHDR: %+v\n", ihdr)
+	case ChunkIEND:
+		log.Println("IEND. Done!")
 	default:
 		fmt.Printf("Skipping chunk type: %s\n", chunkType)
 	}
 
-	// TODO: Return the chunk
 	return &Chunk{
 		Length: length,
-		Type:   chunkType,
+		Type:   ChunkType(chunkType),
+		Data:   chunkData,
+		Crc:    uint32(computedCRC),
 	}, nil
 }
 
