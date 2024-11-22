@@ -2,15 +2,18 @@ package main
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/binary"
-	"errors"
 	"flag"
 	"fmt"
+	"image"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 
 	"github.com/snksoft/crc"
+	"png.adpollak.net/internal/chunk"
 )
 
 func main() {
@@ -23,64 +26,116 @@ func main() {
 	defaultFilePath := filepath.Join(home, "Pictures", "smiley.png")
 
 	// cl-args for png file path
-	var png string
-	flag.StringVar(&png, "png", defaultFilePath, "png file to supply")
+	var pngCLI string
+	flag.StringVar(&pngCLI, "png", defaultFilePath, "png file to supply")
 
 	// NOTE:
 	flag.Parse()
 
 	// Open the png
-	file, err := os.Open(png)
+	file, err := os.Open(pngCLI)
 	if err != nil {
 		log.Fatal(err)
 		return
 	}
 	defer file.Close()
 
-	log.Printf("Successfully opened %s\n", png)
+	log.Printf("Successfully opened %s\n", pngCLI)
 
 	decoder := NewPngDecoder()
 	if _, err := decoder.IsPng(file); err != nil {
 		log.Fatal(err)
 	}
 
-	err = decoder.ParseChunkStream(file)
+	_, err = decoder.ParseChunkStream(file)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	/*
+		f, err := os.Create("image.png")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		err = png.Encode(f, img)
+		if err != nil {
+			log.Fatal(err)
+		}
+	*/
 	log.Println("PNG file parsed successfully!")
 }
 
 // PngDecoder represents the process of reconstructing the reference image from a
 // PNG datastream and generating a delivered image.
 type PngDecoder struct {
-	Chunks []Chunk
+	Chunks []chunk.Chunk
 }
 
 // NewPngDecoder creates a new PngDecoder
 func NewPngDecoder() *PngDecoder {
 	return &PngDecoder{
-		Chunks: make([]Chunk, 0),
+		Chunks: make([]chunk.Chunk, 0),
 	}
 }
 
 // ParseChunkStream parses (decodes) a PNG datastream based on the sequence of
 // chunks read in.
 // NOTE: This method assumes a valid PNG file has already been passed in.
-func (p *PngDecoder) ParseChunkStream(file *os.File) error {
-Loop:
+func (p *PngDecoder) ParseChunkStream(file *os.File) (image.Image, error) {
+	// idat is a buffer to hold idat chunk data
+	// UPDATE: use a bytes.Buffer type instead of []byte for efficient writing to the buffer.
+	var idat bytes.Buffer
+	var ihdr chunk.IHDR
+loop:
 	for {
-		chunk, err := p.readChunk(file)
-		switch {
-		case err != nil:
-			return err
-		case chunk.Type.slug == ChunkIEND.slug:
+		chunkStream, err := p.readChunk(file)
+		if err != nil {
+			return nil, err
+		}
+		switch chunkStream.Type {
+		case chunk.ChunkIHDR:
+			ihdr = chunk.IHDR{
+				Width:             binary.BigEndian.Uint32(chunkStream.Data[0:4]),
+				Height:            binary.BigEndian.Uint32(chunkStream.Data[4:8]),
+				BitDepth:          chunkStream.Data[8],
+				ColorType:         chunkStream.Data[9],
+				CompressionMethod: chunkStream.Data[10],
+				FilterMethod:      chunkStream.Data[11],
+				InterlaceMethod:   chunkStream.Data[12],
+			}
+			log.Printf("IHDR data: %+v\n", ihdr)
+			// TODO: handle image type based on color type
+		case chunk.ChunkIDAT:
+			_, err := idat.Write(chunkStream.Data)
+			if err != nil {
+				return nil, fmt.Errorf("error writing to IDAT buffer: %v", err)
+			}
+			log.Println("Reached IDAT")
+		case chunk.ChunkIEND:
 			log.Println("Reached IEND")
-			break Loop
+			break loop
 		}
 	}
-	return nil
+	// TODO: Use zlib to inflate the IDAT data.
+
+	// Inflate the deflate'd data from idat.
+	inflatedData, err := zlib.NewReader(&idat)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read deflated IDAT data: %v", err)
+	}
+	defer inflatedData.Close()
+
+	// Read inflatedData into a bytes Buffer.
+	var decompressedBytes bytes.Buffer
+	if _, err := io.Copy(&decompressedBytes, inflatedData); err != nil {
+		return nil, fmt.Errorf("error reading inflatedData: %v", err)
+	}
+
+	// TODO: create the image dependent on color type as stated from IHDR.
+	// pixels := decompressedBytes.Bytes() // Transform the bytes Buffer into a slice to work with the image data
+
+	return nil, nil
 }
 
 // isPng determines if a file is a PNG file by examining the PNG signature.
@@ -106,7 +161,7 @@ func (p *PngDecoder) IsPng(file *os.File) (bool, error) {
 }
 
 // readChunk is a helper to read a single chunk of PNG data.
-func (p *PngDecoder) readChunk(file *os.File) (*Chunk, error) {
+func (p *PngDecoder) readChunk(file *os.File) (*chunk.Chunk, error) {
 	// Below is visually what a chunk in the PNG datastream looks like.
 	//  +------------+ +------------+ +------------+ +-------+
 	//  |   LENGTH   | | CHUNK TYPE | | CHUNK DATA | |  CRC  |
@@ -129,7 +184,7 @@ func (p *PngDecoder) readChunk(file *os.File) (*Chunk, error) {
 	chunkBuffer := string(readType)
 
 	// Get the chunk type
-	chunkType, err := FromString(chunkBuffer)
+	chunkType, err := chunk.FromString(chunkBuffer)
 	if err != nil {
 		return nil, fmt.Errorf("unknown chunk type: %s", chunkType)
 	}
@@ -171,132 +226,24 @@ func (p *PngDecoder) readChunk(file *os.File) (*Chunk, error) {
 		return nil, fmt.Errorf("checksums failed for CRC validation: stored %d, calculated %d", storedCRCChunk, computedCRC)
 	}
 
-	// IHDR chunk is the FIRST chunk in the PNG datastream.
-	type IHDR struct {
-		width             uint32
-		height            uint32
-		bitDepth          uint8
-		colorType         uint8
-		compressionMethod uint8
-		filterMethod      uint8
-		interlaceMethod   uint8
-	}
-
 	// Extract the chunk data and store (or ignore) for relevant chunk type.
 	switch chunkType {
-	case ChunkIHDR:
-		// TODO: fill in IHDR chunk values
-		ihdr := IHDR{
-			width:             binary.BigEndian.Uint32(chunkData[0:4]),
-			height:            binary.BigEndian.Uint32(chunkData[4:8]),
-			bitDepth:          chunkData[8],
-			colorType:         chunkData[9],
-			compressionMethod: chunkData[10],
-			filterMethod:      chunkData[11],
-			interlaceMethod:   chunkData[12],
-		}
-		log.Printf("Parsed IHDR: %+v\n", ihdr)
-	case ChunkIEND:
+	case chunk.ChunkIHDR:
+		log.Printf("Parsed IHDR\n")
+	case chunk.ChunkIDAT:
+		log.Printf("Parsed IDAT\n")
+	case chunk.ChunkIEND:
 		log.Println("IEND. Done!")
 	default:
 		fmt.Printf("Skipping chunk type: %s\n", chunkType)
 	}
 
-	return &Chunk{
+	return &chunk.Chunk{
 		Length: length,
-		Type:   ChunkType(chunkType),
+		Type:   chunk.ChunkType(chunkType),
 		Data:   chunkData,
 		Crc:    uint32(computedCRC),
 	}, nil
 }
 
-// Chunk defines the chunk layout as specified by PNG datastream structure.
-type Chunk struct {
-	Length uint32    // A four-byte unsigned integer giving the number of bytes in the chunk's data field.
-	Type   ChunkType // A sequence of four bytes defining the chunk type.
-	Data   []byte    // The data bytes of the relevant chunk type; can be zero length.
-	Crc    uint32    // A four-byte CRC (Cyclic Redundancy Code) calculated on the preceding bytes in the chunk.
-	// Includes chunk type and data, but NOT length.
-}
-
-// isCritical determines if a chunk is a Ancillary or Critical type.
-func (c *Chunk) isCritical() bool {
-	return c.Type.slug[0] >= 'A' && c.Type.slug[0] <= 'Z'
-}
-
-type ChunkType struct {
-	slug string
-}
-
-func (c ChunkType) String() string {
-	return c.slug
-}
-
-func FromString(s string) (ChunkType, error) {
-	switch s {
-	case ChunkIHDR.slug:
-		return ChunkIHDR, nil
-	case ChunkPLTE.slug:
-		return ChunkPLTE, nil
-	case ChunkIDAT.slug:
-		return ChunkIDAT, nil
-	case ChunkIEND.slug:
-		return ChunkIEND, nil
-	case ChunkcHRM.slug:
-		return ChunkcHRM, nil
-	case ChunkgAMA.slug:
-		return ChunkgAMA, nil
-	case ChunkiCCP.slug:
-		return ChunkiCCP, nil
-	case ChunksBIT.slug:
-		return ChunksBIT, nil
-	case ChunksRGB.slug:
-		return ChunksRGB, nil
-	case ChunkbKGD.slug:
-		return ChunkbKGD, nil
-	case ChunkhIST.slug:
-		return ChunkhIST, nil
-	case ChunktRNS.slug:
-		return ChunktRNS, nil
-	case ChunkpHYs.slug:
-		return ChunkpHYs, nil
-	case ChunksPLT.slug:
-		return ChunksPLT, nil
-	case ChunktIME.slug:
-		return ChunktIME, nil
-	case ChunkiTXt.slug:
-		return ChunkiTXt, nil
-	case ChunktEXt.slug:
-		return ChunktEXt, nil
-	case ChunkzTXt.slug:
-		return ChunkzTXt, nil
-	}
-
-	return Unknown, errors.New("unknown chunk type")
-}
-
-var (
-	Unknown = ChunkType{""}
-
-	// NOTE: Critical chunks
-	ChunkIHDR = ChunkType{"IHDR"}
-	ChunkPLTE = ChunkType{"PLTE"}
-	ChunkIDAT = ChunkType{"IDAT"}
-	ChunkIEND = ChunkType{"IEND"}
-
-	// NOTE:  Ancillary chunks
-	ChunkcHRM = ChunkType{"cHRM"}
-	ChunkgAMA = ChunkType{"gAMA"}
-	ChunkiCCP = ChunkType{"iCCP"}
-	ChunksBIT = ChunkType{"sBIT"}
-	ChunksRGB = ChunkType{"sRGB"}
-	ChunkbKGD = ChunkType{"bKGD"}
-	ChunkhIST = ChunkType{"hIST"}
-	ChunktRNS = ChunkType{"tRNS"}
-	ChunkpHYs = ChunkType{"pHYs"}
-	ChunksPLT = ChunkType{"sPLT"}
-	ChunktIME = ChunkType{"tIME"}
-	ChunkiTXt = ChunkType{"iTXt"}
-	ChunktEXt = ChunkType{"tEXt"}
-	ChunkzTXt = ChunkType{"zTXt"}
-)
+// TODO: Create separate functions or methods to handle chunk types
