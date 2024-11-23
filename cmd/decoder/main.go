@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"image"
+	"image/png"
 	"io"
 	"log"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/snksoft/crc"
 	"png.adpollak.net/internal/chunk"
+	"png.adpollak.net/internal/images"
 )
 
 func main() {
@@ -47,22 +49,24 @@ func main() {
 		log.Fatal(err)
 	}
 
-	_, err = decoder.ParseChunkStream(file)
+	img, err := decoder.ParseChunkStream(file)
 	if err != nil {
 		log.Fatal(err)
 	}
+	if img == nil {
+		log.Println("Unimplemented image type")
+		return
+	}
 
-	/*
-		f, err := os.Create("image.png")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer f.Close()
-		err = png.Encode(f, img)
-		if err != nil {
-			log.Fatal(err)
-		}
-	*/
+	f, err := os.Create("image.png")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+	err = png.Encode(f, img)
+	if err != nil {
+		log.Fatal(err)
+	}
 	log.Println("PNG file parsed successfully!")
 }
 
@@ -124,12 +128,15 @@ loop:
 	if _, err := io.Copy(&decompressedBytes, inflatedData); err != nil {
 		return nil, fmt.Errorf("error reading inflatedData: %v", err)
 	}
+	pixels := decompressedBytes.Bytes() // Transform the bytes Buffer into a slice to work with the image data
 
 	// TODO: create the image dependent on color type as stated from IHDR.
-	// pixels := decompressedBytes.Bytes() // Transform the bytes Buffer into a slice to work with the image data
-	// img, err := CreateImage(pixels, ihdr)
+	img, err := images.CreateImage(pixels, ihdr)
+	if err != nil {
+		return nil, err
+	}
 
-	return nil, nil
+	return img, nil
 }
 
 // isPng determines if a file is a PNG file by examining the PNG signature.
