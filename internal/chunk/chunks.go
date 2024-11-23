@@ -1,6 +1,11 @@
 package chunk
 
-import "errors"
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+)
 
 // Chunk defines the chunk layout as specified by PNG datastream structure.
 type Chunk struct {
@@ -19,6 +24,29 @@ type IHDR struct {
 	CompressionMethod uint8
 	FilterMethod      uint8
 	InterlaceMethod   uint8
+}
+
+func HandleIHDR(chunkStream *Chunk) (IHDR, error) {
+	if len(chunkStream.Data) != 13 {
+		return IHDR{}, fmt.Errorf("invalid length for IHDR:", len(chunkStream.Data))
+	}
+	return IHDR{
+		Width:             binary.BigEndian.Uint32(chunkStream.Data[0:4]),
+		Height:            binary.BigEndian.Uint32(chunkStream.Data[4:8]),
+		BitDepth:          chunkStream.Data[8],
+		ColorType:         chunkStream.Data[9],
+		CompressionMethod: chunkStream.Data[10],
+		FilterMethod:      chunkStream.Data[11],
+		InterlaceMethod:   chunkStream.Data[12],
+	}, nil
+}
+
+func HandleIDAT(chunkStream *Chunk, dest io.Writer) error {
+	_, err := dest.Write(chunkStream.Data)
+	if err != nil {
+		return fmt.Errorf("error writing to IDAT buffer: %v", err)
+	}
+	return nil
 }
 
 // isCritical determines if a chunk is a Ancillary or Critical type.

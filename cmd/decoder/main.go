@@ -95,23 +95,16 @@ loop:
 		}
 		switch chunkStream.Type {
 		case chunk.ChunkIHDR:
-			ihdr = chunk.IHDR{
-				Width:             binary.BigEndian.Uint32(chunkStream.Data[0:4]),
-				Height:            binary.BigEndian.Uint32(chunkStream.Data[4:8]),
-				BitDepth:          chunkStream.Data[8],
-				ColorType:         chunkStream.Data[9],
-				CompressionMethod: chunkStream.Data[10],
-				FilterMethod:      chunkStream.Data[11],
-				InterlaceMethod:   chunkStream.Data[12],
-			}
-			log.Printf("IHDR data: %+v\n", ihdr)
-			// TODO: handle image type based on color type
-		case chunk.ChunkIDAT:
-			_, err := idat.Write(chunkStream.Data)
+			ihdr, err = chunk.HandleIHDR(chunkStream)
 			if err != nil {
-				return nil, fmt.Errorf("error writing to IDAT buffer: %v", err)
+				return nil, err
 			}
-			log.Println("Reached IDAT")
+			log.Printf("Handled IHDR: %v\n", ihdr)
+		case chunk.ChunkIDAT:
+			if err := chunk.HandleIDAT(chunkStream, &idat); err != nil {
+				return nil, fmt.Errorf("failed to handle IDAT chunk: %v", err)
+			}
+			log.Println("Handled IDAT")
 		case chunk.ChunkIEND:
 			log.Println("Reached IEND")
 			break loop
@@ -134,6 +127,7 @@ loop:
 
 	// TODO: create the image dependent on color type as stated from IHDR.
 	// pixels := decompressedBytes.Bytes() // Transform the bytes Buffer into a slice to work with the image data
+	// img, err := CreateImage(pixels, ihdr)
 
 	return nil, nil
 }
@@ -245,5 +239,3 @@ func (p *PngDecoder) readChunk(file *os.File) (*chunk.Chunk, error) {
 		Crc:    uint32(computedCRC),
 	}, nil
 }
-
-// TODO: Create separate functions or methods to handle chunk types
