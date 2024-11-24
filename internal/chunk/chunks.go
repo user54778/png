@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math"
 )
 
 // Chunk defines the chunk layout as specified by PNG datastream structure.
@@ -28,7 +30,7 @@ type IHDR struct {
 
 func HandleIHDR(chunkStream *Chunk) (IHDR, error) {
 	if len(chunkStream.Data) != 13 {
-		return IHDR{}, fmt.Errorf("invalid length for IHDR:", len(chunkStream.Data))
+		return IHDR{}, fmt.Errorf("invalid length for IHDR: %d", len(chunkStream.Data))
 	}
 	return IHDR{
 		Width:             binary.BigEndian.Uint32(chunkStream.Data[0:4]),
@@ -45,6 +47,58 @@ func HandleIDAT(chunkStream *Chunk, dest io.Writer) error {
 	_, err := dest.Write(chunkStream.Data)
 	if err != nil {
 		return fmt.Errorf("error writing to IDAT buffer: %v", err)
+	}
+	return nil
+}
+
+type GAMA struct {
+	Gamma uint32 // Encoded as a four-byte unsigned integer, representing Gamma * 100000
+}
+
+func ParseGAMA(data []byte) (*GAMA, error) {
+	if len(data) != 4 {
+		return nil, fmt.Errorf("gAMA length must be 4 bytes; got: %d", len(data))
+	}
+
+	// NOTE: don't forget the data in the datastream MUST be converted to big endian
+	// Convert data to 4 bytes in big endian.
+	gamma := binary.BigEndian.Uint32(data)
+
+	return &GAMA{Gamma: gamma}, nil
+}
+
+// convertGamma converts the Image gamma value to a float64.
+func (g *GAMA) ConvertGamma() float64 {
+	return float64(g.Gamma) / 100_000.0
+}
+
+// normalizePixel normalizes a pixel value based on its bitDepth.
+// It returns the sample for that pixel.
+func normalizePixel(pixelValue int, bitDepth uint8) float64 {
+	// (2^sampledepth - 1.0)
+	maxValue := math.Pow(2, float64(bitDepth)) - 1
+	return float64(pixelValue) / maxValue
+}
+
+func (g *GAMA) HandlegAMA(pixels []byte, bitDepth uint8) error {
+	log.Printf("before gamma %d\n", g.Gamma)
+	gamma := g.ConvertGamma()
+	log.Printf("gamma: %f\n", gamma)
+
+	maxValue := math.Pow(2, float64(bitDepth)) - 1
+	// Traverse over each pixel value, and apply the decoder gamma handling
+	// as specified in 13.13.
+	for i := 0; i < len(pixels); i++ {
+		sample := normalizePixel(int(pixels[i]), bitDepth)
+		// log.Printf("sample: %f\n", sample)
+		displayOutput := math.Pow(sample, 1.0/gamma)
+		// log.Printf("displayOutput: %f\n", displayOutput)
+		// These steps aren't needed (yet)
+		// display_input = inverse_display_transfer(display_output)
+		// framebuf_sample = floor((display_input * MAX_FRAMEBUF_SAMPLE)+0.5)
+
+		// Simply denormalize the value to the original bitDepth.
+		pixels[i] = uint8(math.Round(displayOutput * maxValue))
 	}
 	return nil
 }

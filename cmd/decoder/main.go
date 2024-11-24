@@ -91,6 +91,8 @@ func (p *PngDecoder) ParseChunkStream(file *os.File) (image.Image, error) {
 	// UPDATE: use a bytes.Buffer type instead of []byte for efficient writing to the buffer.
 	var idat bytes.Buffer
 	var ihdr chunk.IHDR
+	var gamma *chunk.GAMA
+	var idat_len int
 loop:
 	for {
 		chunkStream, err := p.readChunk(file)
@@ -108,13 +110,20 @@ loop:
 			if err := chunk.HandleIDAT(chunkStream, &idat); err != nil {
 				return nil, fmt.Errorf("failed to handle IDAT chunk: %v", err)
 			}
-			log.Println("Handled IDAT")
+			idat_len = int(chunkStream.Length)
+			log.Printf("Handled IDAT: %v\n", idat)
+		case chunk.ChunkgAMA:
+			gamma, err = chunk.ParseGAMA(chunkStream.Data)
+			log.Printf("gamma: %v\n", gamma)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse gAMA chunk: %v", err)
+			}
+			log.Println(chunkStream)
 		case chunk.ChunkIEND:
 			log.Println("Reached IEND")
 			break loop
 		}
 	}
-	// TODO: Use zlib to inflate the IDAT data.
 
 	// Inflate the deflate'd data from idat.
 	inflatedData, err := zlib.NewReader(&idat)
@@ -128,7 +137,18 @@ loop:
 	if _, err := io.Copy(&decompressedBytes, inflatedData); err != nil {
 		return nil, fmt.Errorf("error reading inflatedData: %v", err)
 	}
-	pixels := decompressedBytes.Bytes() // Transform the bytes Buffer into a slice to work with the image data
+	// pixels := decompressedBytes.Bytes() // Transform the bytes Buffer into a slice to work with the image data
+	pixels := decompressedBytes.Bytes()
+	log.Println(pixels)
+	temp := len(pixels) - idat_len
+	pixels = pixels[temp:]
+
+	log.Printf("IHDR: %v\n", ihdr)
+	err = gamma.HandlegAMA(pixels, ihdr.BitDepth)
+	if err != nil {
+		return nil, err
+	}
+	log.Println(pixels)
 
 	// TODO: create the image dependent on color type as stated from IHDR.
 	img, err := images.CreateImage(pixels, ihdr)
@@ -137,28 +157,6 @@ loop:
 	}
 
 	return img, nil
-}
-
-// isPng determines if a file is a PNG file by examining the PNG signature.
-func (p *PngDecoder) IsPng(file *os.File) (bool, error) {
-	// 137 80 78 71 13 10 26 10
-	const pngSignatureHex = "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A"
-
-	// First 8 bytes of the PNG datastream should be the same as the const above.
-	signature := make([]byte, 8)
-	n, err := file.Read(signature)
-	switch {
-	case err != nil:
-		return false, err
-	case n != len(pngSignatureHex):
-		return false, fmt.Errorf("n: %d and pngSignatureHex length: %d are mismatched", n, len(pngSignatureHex))
-	case !bytes.Equal(signature, []byte(pngSignatureHex)):
-		return false, fmt.Errorf("signature mismatch: got %x, expected %x", signature, pngSignatureHex)
-	}
-
-	log.Println("Successfully validated PNG signature!")
-
-	return true, nil
 }
 
 // readChunk is a helper to read a single chunk of PNG data.
@@ -235,6 +233,8 @@ func (p *PngDecoder) readChunk(file *os.File) (*chunk.Chunk, error) {
 		log.Printf("Parsed IDAT\n")
 	case chunk.ChunkIEND:
 		log.Println("IEND. Done!")
+	case chunk.ChunkgAMA:
+		log.Println("Parsed gAMA")
 	default:
 		fmt.Printf("Skipping chunk type: %s\n", chunkType)
 	}
@@ -245,4 +245,26 @@ func (p *PngDecoder) readChunk(file *os.File) (*chunk.Chunk, error) {
 		Data:   chunkData,
 		Crc:    uint32(computedCRC),
 	}, nil
+}
+
+// isPng determines if a file is a PNG file by examining the PNG signature.
+func (p *PngDecoder) IsPng(file *os.File) (bool, error) {
+	// 137 80 78 71 13 10 26 10
+	const pngSignatureHex = "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A"
+
+	// First 8 bytes of the PNG datastream should be the same as the const above.
+	signature := make([]byte, 8)
+	n, err := file.Read(signature)
+	switch {
+	case err != nil:
+		return false, err
+	case n != len(pngSignatureHex):
+		return false, fmt.Errorf("n: %d and pngSignatureHex length: %d are mismatched", n, len(pngSignatureHex))
+	case !bytes.Equal(signature, []byte(pngSignatureHex)):
+		return false, fmt.Errorf("signature mismatch: got %x, expected %x", signature, pngSignatureHex)
+	}
+
+	log.Println("Successfully validated PNG signature!")
+
+	return true, nil
 }

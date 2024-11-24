@@ -13,6 +13,7 @@ import (
 // recreate a PNG image. It then returns said image.
 func CreateImage(pixels []byte, ihdr chunk.IHDR) (image.Image, error) {
 	// Switch on the 5 color types as specified in the PNG specification.
+	// TODO: implement other color types
 	var img image.Image
 	width := ihdr.Width
 	height := ihdr.Height
@@ -20,7 +21,6 @@ func CreateImage(pixels []byte, ihdr chunk.IHDR) (image.Image, error) {
 	case 0:
 		img = handleGreyscale(pixels, int(width), int(height))
 		log.Println("ColorType: Greyscale")
-		// TODO: handle Greyscale;
 	case 2:
 		log.Println("ColorType : Truecolor")
 	case 3:
@@ -32,7 +32,6 @@ func CreateImage(pixels []byte, ihdr chunk.IHDR) (image.Image, error) {
 	default:
 		return nil, fmt.Errorf("invalid ColorType: %v", ihdr.ColorType)
 	}
-	// TODO: create the image, and return it based on the handler
 
 	return img, nil
 }
@@ -44,6 +43,7 @@ func handleGreyscale(pixels []byte, width, height int) *image.Gray {
 	// pixels w/in a scanline packed into a sequence of bytes
 	// greyscale: each pixel is one sample
 	// TODO: Need to traverse the pixels, and populate our grayscale image with it's information
+	log.Println(len(pixels))
 
 	scanline := width
 	for r := 0; r < height; r++ {
@@ -52,11 +52,13 @@ func handleGreyscale(pixels []byte, width, height int) *image.Gray {
 			// Thus, we need an OFFSET to determine WHERE to access a specific element.
 			// Traverse each pixel group; l -> r, t -> b
 			offset := r*scanline + c
+			// FIXME: this is a hacky fix since the width * height != original image width * height, as we are not handling
+			// ancillary chunks
 			if offset >= len(pixels) {
 				break
 			}
-			greyValue := pixels[offset]
-			img.SetGray(r, c, color.Gray{Y: greyValue})
+			sample := pixels[offset]
+			img.SetGray(r, c, color.Gray{Y: sample})
 		}
 	}
 	return img
